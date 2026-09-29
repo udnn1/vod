@@ -31,6 +31,7 @@ Lekka wyszukiwarka filmów i seriali pokazująca, gdzie dany tytuł jest dostęp
 - obsługa filmów, seriali, kolekcji i szczegółów produkcji
 - responsywny interfejs dla desktopu i urządzeń mobilnych
 - lokalne proxy zabezpieczające zapytania do zewnętrznych usług
+- dane zawsze na żywo, bez cache po stronie serwera
 
 ## Stack technologiczny
 
@@ -40,7 +41,7 @@ Lekka wyszukiwarka filmów i seriali pokazująca, gdzie dany tytuł jest dostęp
 - **TMDB API**
 - **Filmweb**
 - **Upflix**
-- **Python 3 + Scrapling** jako opcjonalna warstwa pomocnicza
+- **Python 3 + Scrapling + httpcloak** jako opcjonalna warstwa pomocnicza
 
 ## Wymagania
 
@@ -81,6 +82,16 @@ Projekt korzysta z TMDB API. Utwórz lokalny plik `tmdb-auth.json` w katalogu pr
 }
 ```
 
+Plik zawiera sekrety, więc serwer WWW nie może go wydawać. Przykład dla nginx:
+
+```nginx
+location ~ \.(json|py)$ {
+    deny all;
+}
+```
+
+Zamiast pliku można użyć zmiennych środowiskowych:
+
 ```bash
 TMDB_API_BEARER_TOKEN=twoj_token_bearer
 TMDB_API_KEY=twoj_klucz_api
@@ -100,8 +111,14 @@ Most Scrapling uruchamia skrypt Python z poziomu PHP i pomaga pobierać dane z s
 Instalacja zależności:
 
 ```bash
-python -m pip install scrapling
+python -m pip install scrapling httpcloak
 ```
+
+Strony pobierane są kolejno trzema drogami, aż któraś się uda:
+
+1. `httpcloak` z odciskiem przeglądarki Chrome, jednym połączeniem HTTP/2 dla wszystkich artykułów,
+2. zwykły `urllib`,
+3. `httpcloak` przez WARP (`socks5://127.0.0.1:40000`), gdy blokada idzie po adresie IP.
 
 Opcjonalne zmienne:
 
@@ -111,3 +128,13 @@ SCRAPLING_DISABLED=1
 ```
 
 `SCRAPLING_DISABLED=1` wyłącza warstwę Scrapling i pozostawia standardowe mechanizmy PHP.
+
+## Wydajność
+
+Projekt celowo nie ma cache: każde wejście pobiera aktualne dane. Szybkość wynika z ograniczania liczby zapytań i połączeń:
+
+- zapytania do Filmwebu i TMDB idą równolegle jednym połączeniem HTTP/2 (`CURLOPT_PIPEWAIT`) zamiast osobnego połączenia i handshake'u TLS na każde zapytanie,
+- przeglądarka łączy zapytania TMDB wysłane w tej samej chwili w jedno zapytanie zbiorcze (`tmdb-proxy.php?batch=`, do 20 pozycji),
+- dopasowanie nowości do Filmwebu idzie wsadem (`filmweb-proxy.php?action=matchBatch`, do 30 tytułów),
+- na półce nowości dane z TMDB (plakat, gatunki, opis) i odnośniki Filmwebu ładują się niezależnie, więc plakaty nie czekają na Filmweb i nie podmieniają się po załadowaniu.
+

@@ -11,6 +11,7 @@ const FILMWEB_DEFAULT_LOCALE = 'pl-PL';
 const FILMWEB_PROVIDER_LOGO_BASE = 'https://fwcdn.pl/vodp';
 const FILMWEB_PAGE_BASE = 'https://www.filmweb.pl';
 const FILMWEB_ALLOWED_MEDIA_TYPES = ['film', 'serial'];
+const FILMWEB_MATCH_BATCH_LIMIT = 30;
 
 function jsonResponse(int $statusCode, array $payload): never
 {
@@ -76,6 +77,8 @@ function filmwebCurlBaseOptions(array $headers): array
         CURLOPT_FOLLOWLOCATION => false,
         CURLOPT_TIMEOUT => 20,
         CURLOPT_TCP_KEEPALIVE => 1,
+        CURLOPT_HTTP_VERSION => CURL_HTTP_VERSION_2TLS,
+        CURLOPT_PIPEWAIT => true,
         CURLOPT_HTTPHEADER => $headers,
     ];
 
@@ -1202,12 +1205,6 @@ function groupLabelForType(string $typeKey): ?string
 {
     return match ($typeKey) {
         'subscription' => 'Abonament',
-        'watchFree' => 'Za darmo',
-        'watchWithAds' => 'Z reklamami',
-        'buy' => 'Kup',
-        'rent' => 'Wypożycz',
-        'buyOrRent' => 'Kup / wypożycz',
-        'onlineTelevision' => 'Telewizja online',
         default => null,
     };
 }
@@ -1275,7 +1272,7 @@ function providerHasSubscriptionPlan(array $providerMeta): bool
     return $subscriptionPrices !== '' || $planPrices !== [];
 }
 
-function selectPaymentsGroup(array $payments, string $groupType): ?array
+function selectSubscriptionPayments(array $payments): ?array
 {
     $groupedPayments = [];
 
@@ -1298,36 +1295,9 @@ function selectPaymentsGroup(array $payments, string $groupType): ?array
     }
 
     foreach ($groupedPayments as $groupItems) {
-        $paymentTypes = array_values(array_unique(array_filter(array_map(
-            static fn (array $item): string => trim((string) ($item['paymentType'] ?? '')),
-            $groupItems
-        ))));
-        $type = providerTypeFromPayment($groupItems);
-
-        if ($groupType === 'buyOrRent' && in_array($type, ['buy', 'rent', 'buyOrRent'], true)) {
+        if (providerTypeFromPayment($groupItems) === 'subscription') {
             return [
-                'type' => $type,
-                'link' => trim((string) ($groupItems[0]['paymentUrl'] ?? '')),
-            ];
-        }
-
-        if ($groupType === 'watchOrFree' && $type === 'subscription') {
-            return [
-                'type' => $type,
-                'link' => trim((string) ($groupItems[0]['paymentUrl'] ?? '')),
-            ];
-        }
-
-        if ($groupType === 'watchOnlineTelevision' && $type === 'onlineTelevision') {
-            return [
-                'type' => $type,
-                'link' => trim((string) ($groupItems[0]['paymentUrl'] ?? '')),
-            ];
-        }
-
-        if ($groupType === 'freeWithAds' && $type === 'watchWithAds') {
-            return [
-                'type' => $type,
+                'type' => 'subscription',
                 'link' => trim((string) ($groupItems[0]['paymentUrl'] ?? '')),
             ];
         }
@@ -1403,7 +1373,7 @@ function normalizeFilmwebProviders(array $offers, array $providers, ?string $vod
         $payments = is_array($offer['payments'] ?? null) ? $offer['payments'] : [];
 
         $subscription = $payments !== []
-            ? selectPaymentsGroup($payments, 'watchOrFree')
+            ? selectSubscriptionPayments($payments)
             : (providerHasSubscriptionPlan($providerMeta)
                 ? [
                     'type' => 'subscription',
@@ -1522,6 +1492,10 @@ try {
 
         if (!is_array($decoded)) {
             jsonResponse(400, ['error' => 'Brak listy tytułów do dopasowania Filmweb.']);
+        }
+
+        if (count($decoded) > FILMWEB_MATCH_BATCH_LIMIT) {
+            jsonResponse(400, ['error' => 'Za dużo tytułów do dopasowania Filmweb naraz.']);
         }
 
         jsonResponse(200, ['results' => matchFilmwebBatch($decoded)]);

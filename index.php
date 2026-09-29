@@ -1946,6 +1946,7 @@ $faviconHref = 'data:image/svg+xml,' . rawurlencode($faviconSvg);
   <script>
     const LOCAL_API_ENDPOINT = "tmdb-proxy.php";
     const FILMWEB_API_ENDPOINT = "filmweb-proxy.php";
+    const TMDB_BATCH_LIMIT = 20;
     const UPFLIX_API_ENDPOINT = "upflix-proxy.php";
     const TMDB_IMAGE_BASE = "https://image.tmdb.org/t/p";
     const DEFAULT_REGION = "PL";
@@ -1954,9 +1955,6 @@ $faviconHref = 'data:image/svg+xml,' . rawurlencode($faviconSvg);
     const SEARCH_PAGE_LIMIT = 2;
     const HOME_GRID_SIZE = 6;
     const HOME_SHOW_MORE_STEP = 6;
-    const CALENDAR_DAYS_AHEAD = 45;
-    const CALENDAR_PAGE_LIMIT = 6;
-    const CALENDAR_GRID_SIZE = 80;
     const SMALL_COLLECTION_INSERT_LIMIT = 12;
     const RANDOM_MAX_PAGES = 20;
     const MAX_TYPO_DISTANCE = 2;
@@ -2024,6 +2022,8 @@ $faviconHref = 'data:image/svg+xml,' . rawurlencode($faviconSvg);
     const filmwebMatchCache = new Map();
     const filmwebNewsMatchCache = new Map();
     const localizedNewsItemCache = new Map();
+    const tmdbBatchQueue = [];
+    let tmdbBatchScheduled = false;
     const enrichedSearchResultCache = new Map();
     const movieCollectionCache = new Map();
     const tmdbProviderDataCache = new Map();
@@ -2120,15 +2120,103 @@ $faviconHref = 'data:image/svg+xml,' . rawurlencode($faviconSvg);
       return new Date().toISOString().slice(0, 10);
     }
 
-    async function tmdbRequest(path, params) {
+    function tmdbRequestParams(params) {
+      const cleaned = {};
+
+      Object.entries(params || {}).forEach(([key, value]) => {
+        if (value !== undefined && value !== null && value !== "") {
+          cleaned[key] = String(value);
+        }
+      });
+
+      return cleaned;
+    }
+
+    function tmdbRequest(path, params) {
+      return new Promise((resolve, reject) => {
+        tmdbBatchQueue.push({ path, params: tmdbRequestParams(params), resolve, reject });
+
+        if (!tmdbBatchScheduled) {
+          tmdbBatchScheduled = true;
+          setTimeout(flushTmdbBatchQueue, 0);
+        }
+      });
+    }
+
+    function flushTmdbBatchQueue() {
+      const queued = tmdbBatchQueue.splice(0);
+
+      tmdbBatchScheduled = false;
+
+      for (let start = 0; start < queued.length; start += TMDB_BATCH_LIMIT) {
+        sendTmdbBatch(queued.slice(start, start + TMDB_BATCH_LIMIT));
+      }
+    }
+
+    function sendTmdbSingle(entry) {
+      tmdbSingleRequest(entry.path, entry.params).then(entry.resolve, entry.reject);
+    }
+
+    async function sendTmdbBatch(entries) {
+      if (entries.length === 1) {
+        sendTmdbSingle(entries[0]);
+        return;
+      }
+
+      let results = null;
+
+      try {
+        const url = new URL(LOCAL_API_ENDPOINT, window.location.href);
+
+        url.searchParams.set("batch", JSON.stringify(entries.map((entry) => ({
+          path: entry.path,
+          params: entry.params,
+        }))));
+
+        const response = await fetch(url.toString(), {
+          method: "GET",
+          headers: {
+            "Accept": "application/json",
+          },
+        });
+        const payload = await response.json().catch(() => null);
+
+        results = response.ok && payload && Array.isArray(payload.results) && payload.results.length === entries.length
+          ? payload.results
+          : null;
+      } catch (error) {
+        results = null;
+      }
+
+      if (!results) {
+        entries.forEach(sendTmdbSingle);
+        return;
+      }
+
+      entries.forEach((entry, index) => {
+        const result = results[index] || {};
+        const body = result.body && typeof result.body === "object" ? result.body : null;
+
+        if (result.status >= 200 && result.status < 300) {
+          entry.resolve(body || {});
+          return;
+        }
+
+        entry.reject(new Error(
+          body && (body.error || body.status_message)
+            ? (body.error || body.status_message)
+            : "Nie udało się pobrać danych z TMDb."
+        ));
+      });
+    }
+
+    async function tmdbSingleRequest(path, params) {
       const url = new URL(LOCAL_API_ENDPOINT, window.location.href);
 
       url.searchParams.set("path", path);
 
-      Object.entries(params || {}).forEach(([key, value]) => {
-        if (value !== undefined && value !== null && value !== "") {
-          url.searchParams.set(key, value);
-        }
+      Object.entries(params).forEach(([key, value]) => {
+        url.searchParams.set(key, value);
       });
 
       const response = await fetch(url.toString(), {
@@ -4150,27 +4238,17 @@ $faviconHref = 'data:image/svg+xml,' . rawurlencode($faviconSvg);
           newsItem.title,
         ].filter(Boolean).map((value) => String(value).trim()).filter(Boolean)));
 
-        const candidates = [];
+        const payloads = await Promise.all(queries.map((query) => tmdbRequest(path, {
+          query,
+          language: DEFAULT_LANGUAGE,
+          include_adult: "false",
+          page: "1",
+        }).catch(() => null)));
 
-        for (const query of queries) {
-          try {
-            const payload = await tmdbRequest(path, {
-              query,
-              language: DEFAULT_LANGUAGE,
-              include_adult: "false",
-              page: "1",
-            });
-
-            (payload.results || []).forEach((item) => {
-              candidates.push({
-                ...item,
-                media_type: mediaType,
-              });
-            });
-          } catch (error) {
-            // Pomiń pojedyncze nieudane wyszukanie.
-          }
-        }
+        const candidates = payloads.flatMap((payload) => ((payload && payload.results) || []).map((item) => ({
+          ...item,
+          media_type: mediaType,
+        })));
 
         const uniqueCandidates = dedupeSearchResults(candidates)
           .filter(hasPremiered)
@@ -4211,10 +4289,9 @@ $faviconHref = 'data:image/svg+xml,' . rawurlencode($faviconSvg);
       }
 
       const request = (async () => {
-        const [tmdbItem, genreMaps, filmwebUrl] = await Promise.all([
+        const [tmdbItem, genreMaps] = await Promise.all([
           resolveTmdbNewsMatch(item),
           loadGenreMaps(),
-          resolveFilmwebUrlForNewsItem(item),
         ]);
 
         const title = item.title || (tmdbItem ? mediaTitle(tmdbItem) : "Bez tytułu");
@@ -4226,15 +4303,12 @@ $faviconHref = 'data:image/svg+xml,' . rawurlencode($faviconSvg);
         const tmdbPoster = tmdbItem ? imageUrl(tmdbItem.poster_path || "", "w342") : null;
 
         return {
-          ...item,
           title,
           englishTitle,
           genres: tmdbItem ? genreNamesForItem(tmdbItem, genreMaps) : [],
           overview: tmdbItem && tmdbItem.overview ? tmdbItem.overview : "",
           poster: tmdbPoster || item.poster || null,
           posterLoading: false,
-          filmwebUrl: item.filmwebUrl || filmwebUrl || "",
-          filmwebLoading: false,
         };
       })();
 
@@ -4255,8 +4329,8 @@ $faviconHref = 'data:image/svg+xml,' . rawurlencode($faviconSvg);
         englishTitle,
         genres: Array.isArray(item.genres) ? item.genres : [],
         overview: item.overview || "",
-        poster: item.poster || null,
-        posterLoading: item.posterLoading !== false,
+        poster: null,
+        posterLoading: true,
         filmwebUrl: item.filmwebUrl || "",
         filmwebLoading: item.filmwebLoading !== false,
       };
@@ -4286,37 +4360,39 @@ $faviconHref = 'data:image/svg+xml,' . rawurlencode($faviconSvg);
 
       primeFilmwebNewsLinks(nextItems);
 
-      return Promise.allSettled(nextItems.map((rawItem) => enrichNewsItem(rawItem)))
-        .then((results) => {
-          if (state.loadToken !== loadToken) {
-            return;
-          }
+      const applyStage = (results, patchFor) => {
+        if (state.loadToken !== loadToken) {
+          return;
+        }
 
-          results.forEach((result, index) => {
-            enrichedItems[startIndex + index] = result.status === "fulfilled" && result.value
-              ? result.value
-              : {
-                ...baseNewsDisplayItem(nextItems[index]),
-                filmwebLoading: false,
-              };
-          });
+        results.forEach((result, index) => {
+          const position = startIndex + index;
 
-          renderHomeShelf(platform);
-        })
-        .catch(() => {
-          if (state.loadToken === loadToken) {
-            for (let index = startIndex; index < endIndex; index += 1) {
-              if (enrichedItems[index]) {
-                enrichedItems[index] = {
-                  ...enrichedItems[index],
-                  filmwebLoading: false,
-                };
-              }
-            }
-
-            renderHomeShelf(platform);
+          if (enrichedItems[position]) {
+            enrichedItems[position] = {
+              ...enrichedItems[position],
+              ...patchFor(result, nextItems[index]),
+            };
           }
         });
+
+        renderHomeShelf(platform);
+      };
+
+      const tmdbStage = Promise.allSettled(nextItems.map((rawItem) => enrichNewsItem(rawItem)))
+        .then((results) => applyStage(results, (result, rawItem) => (
+          result.status === "fulfilled" && result.value
+            ? result.value
+            : { poster: rawItem.poster || null, posterLoading: false }
+        )));
+
+      const filmwebStage = Promise.allSettled(nextItems.map((rawItem) => resolveFilmwebUrlForNewsItem(rawItem)))
+        .then((results) => applyStage(results, (result, rawItem) => ({
+          filmwebUrl: rawItem.filmwebUrl || (result.status === "fulfilled" ? result.value : "") || "",
+          filmwebLoading: false,
+        })));
+
+      return Promise.all([tmdbStage, filmwebStage]);
     }
 
     function renderHomeShelf(platform) {

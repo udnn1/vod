@@ -18,6 +18,11 @@ from dataclasses import dataclass
 from typing import Any
 
 try:
+    import httpcloak
+except Exception:
+    httpcloak = None
+
+try:
     from scrapling.parser import Selector
 except Exception as exc:
     print(json.dumps({"ok": False, "error": f"Scrapling import failed: {exc}"}))
@@ -42,6 +47,9 @@ UPFLIX_SKIP_TITLE_FRAGMENTS = (
     "co wydarzy sie",
 )
 FILMWEB_BASE_URL = "https://www.filmweb.pl"
+HTTPCLOAK_PRESET = "chrome-146-windows"
+HTTPCLOAK_TIMEOUT = 20
+WARP_PROXY = "socks5://127.0.0.1:40000"
 
 HTTP_HEADERS = {
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,application/rss+xml;q=0.9,*/*;q=0.8",
@@ -60,7 +68,49 @@ def json_error(message: str) -> None:
     print(json.dumps({"ok": False, "error": message}, separators=(",", ":")))
 
 
+@functools.lru_cache(maxsize=None)
+def cloak_session(proxy: str | None) -> Any:
+    return httpcloak.Session(preset=HTTPCLOAK_PRESET, proxy=proxy, timeout=HTTPCLOAK_TIMEOUT)
+
+
+def fetch_text_cloak(url: str, proxy: str | None) -> str:
+    response = cloak_session(proxy).get(url, headers={"Accept-Language": HTTP_HEADERS["Accept-Language"]})
+
+    if response.status_code < 200 or response.status_code >= 300:
+        raise RuntimeError(f"HTTP {response.status_code} for {url}")
+
+    text = response.text
+
+    if not text.strip():
+        raise RuntimeError(f"Empty response for {url}")
+
+    return text
+
+
 def fetch_text(url: str, timeout: int = 25) -> str:
+    errors = []
+
+    if httpcloak is not None:
+        try:
+            return fetch_text_cloak(url, None)
+        except Exception as exc:
+            errors.append(f"httpcloak: {exc}")
+
+    try:
+        return fetch_text_urllib(url, timeout)
+    except Exception as exc:
+        errors.append(f"urllib: {exc}")
+
+    if httpcloak is not None:
+        try:
+            return fetch_text_cloak(url, WARP_PROXY)
+        except Exception as exc:
+            errors.append(f"httpcloak+warp: {exc}")
+
+    raise RuntimeError("; ".join(errors))
+
+
+def fetch_text_urllib(url: str, timeout: int) -> str:
     request = urllib.request.Request(url, headers=HTTP_HEADERS)
 
     with urllib.request.urlopen(request, timeout=timeout) as response:
@@ -114,6 +164,7 @@ def strip_accents(value: str) -> str:
     return normalized.encode("ascii", "ignore").decode("ascii")
 
 
+@functools.lru_cache(maxsize=None)
 def normalize_key(value: str) -> str:
     value = strip_accents(clean_text(value)).lower()
     return re.sub(r"[^a-z0-9]+", " ", value).strip()
@@ -402,6 +453,7 @@ def extract_article_date_from_html(article_html: str, fallback: str | None) -> s
     return parse_polish_date_from_text(top_text, fallback) or fallback
 
 
+@functools.lru_cache(maxsize=None)
 def section_type_from_heading(heading: str) -> str | None:
     normalized = normalize_key(heading)
 
@@ -508,6 +560,7 @@ def extract_rating_from_cells(cells: list[str]) -> str:
     return ""
 
 
+@functools.lru_cache(maxsize=None)
 def table_rows(table_html: str) -> list[list[dict[str, Any]]]:
     table = Selector(table_html)
     rows = []

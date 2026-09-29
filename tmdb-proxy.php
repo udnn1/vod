@@ -31,6 +31,8 @@ const TMDB_ALLOWED_PARAMS = [
     'first_air_date.lte',
 ];
 
+const TMDB_BATCH_LIMIT = 20;
+
 const TMDB_PARAM_ALIASES = [
     'vote_count_gte' => 'vote_count.gte',
     'vote_count_lte' => 'vote_count.lte',
@@ -212,7 +214,7 @@ function tmdbBaseUrl(): string
     return TMDB_API_BASE_HTTP;
 }
 
-function tmdbRequest(string $path, array $params, array $credentials): array
+function tmdbRequestTarget(string $path, array $params, array $credentials): array
 {
     $query = http_build_query($params);
     $baseUrl = tmdbBaseUrl();
@@ -231,6 +233,13 @@ function tmdbRequest(string $path, array $params, array $credentials): array
     } elseif ($credentials['bearer'] !== '') {
         $headers[] = 'Authorization: Bearer ' . $credentials['bearer'];
     }
+
+    return [$url, $headers];
+}
+
+function tmdbRequest(string $path, array $params, array $credentials): array
+{
+    [$url, $headers] = tmdbRequestTarget($path, $params, $credentials);
 
     if (function_exists('curl_init')) {
         $curlHandle = curl_init($url);
@@ -286,6 +295,58 @@ function tmdbRequest(string $path, array $params, array $credentials): array
     return [$statusCode, decodeTmdbResponseBody((string) $body)];
 }
 
+function tmdbBatchRequest(array $requests, array $credentials): array
+{
+    $multiHandle = curl_multi_init();
+    $handles = [];
+
+    foreach ($requests as $index => [$path, $params]) {
+        [$url, $headers] = tmdbRequestTarget($path, $params, $credentials);
+        $handle = curl_init($url);
+
+        curl_setopt_array($handle, [
+            CURLOPT_HTTPGET => true,
+            CURLOPT_RETURNTRANSFER => true,
+            CURLOPT_FOLLOWLOCATION => false,
+            CURLOPT_TIMEOUT => 20,
+            CURLOPT_HTTP_VERSION => CURL_HTTP_VERSION_2TLS,
+            CURLOPT_PIPEWAIT => true,
+            CURLOPT_HTTPHEADER => $headers,
+        ]);
+
+        curl_multi_add_handle($multiHandle, $handle);
+        $handles[$index] = $handle;
+    }
+
+    do {
+        $status = curl_multi_exec($multiHandle, $running);
+
+        if ($running) {
+            curl_multi_select($multiHandle, 1.0);
+        }
+    } while ($running && $status === CURLM_OK);
+
+    $results = [];
+
+    foreach ($handles as $index => $handle) {
+        $body = curl_multi_getcontent($handle);
+        $statusCode = (int) curl_getinfo($handle, CURLINFO_RESPONSE_CODE);
+        $payload = is_string($body) && $body !== '' ? json_decode(decodeTmdbResponseBody($body), true) : null;
+
+        curl_multi_remove_handle($multiHandle, $handle);
+        curl_close($handle);
+
+        $results[$index] = [
+            'status' => $statusCode > 0 ? $statusCode : 502,
+            'body' => is_array($payload) ? $payload : ['error' => 'Nie udało się pobrać danych z TMDb.'],
+        ];
+    }
+
+    curl_multi_close($multiHandle);
+
+    return $results;
+}
+
 function decodeTmdbResponseBody(string $body): string
 {
     if (!str_starts_with($body, "\x1f\x8b")) {
@@ -307,6 +368,39 @@ function decodeTmdbResponseBody(string $body): string
 
 if (($_SERVER['REQUEST_METHOD'] ?? 'GET') !== 'GET') {
     jsonResponse(405, ['error' => 'Dozwolona jest tylko metoda GET.']);
+}
+
+if (isset($_GET['batch'])) {
+    $decoded = is_string($_GET['batch']) ? json_decode($_GET['batch'], true) : null;
+
+    if (!is_array($decoded) || $decoded === [] || !array_is_list($decoded) || count($decoded) > TMDB_BATCH_LIMIT) {
+        jsonResponse(400, ['error' => 'Nieprawidłowa lista zapytań TMDb.']);
+    }
+
+    $requests = [];
+
+    foreach ($decoded as $entry) {
+        $entryPath = is_array($entry) && is_string($entry['path'] ?? null) ? trim($entry['path']) : '';
+        $entryParams = is_array($entry['params'] ?? null) ? $entry['params'] : [];
+
+        if ($entryPath === '' || !allowedPath($entryPath)) {
+            jsonResponse(400, ['error' => 'Nieprawidłowy endpoint TMDb.']);
+        }
+
+        $requests[] = [$entryPath, filteredParams($entryParams)];
+    }
+
+    $credentials = tmdbCredentials();
+
+    if ($credentials['bearer'] === '' && $credentials['apiKey'] === '') {
+        jsonResponse(500, ['error' => 'Brak konfiguracji TMDb po stronie serwera.']);
+    }
+
+    if (!function_exists('curl_multi_init')) {
+        jsonResponse(501, ['error' => 'Serwer nie obsługuje zapytań zbiorczych TMDb.']);
+    }
+
+    jsonResponse(200, ['results' => tmdbBatchRequest($requests, $credentials)]);
 }
 
 $path = trim((string) ($_GET['path'] ?? ''));
