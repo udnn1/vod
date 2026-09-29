@@ -3351,6 +3351,20 @@ $faviconHref = 'data:image/svg+xml,' . rawurlencode($faviconSvg);
       setHomeNewsToggleState(false);
     }
 
+    function safeExternalUrl(value) {
+      if (!value) {
+        return "";
+      }
+
+      try {
+        const url = new URL(String(value || ""), window.location.href);
+
+        return url.protocol === "https:" || url.protocol === "http:" ? url.href : "";
+      } catch (error) {
+        return "";
+      }
+    }
+
     function escapeHtml(value) {
       return String(value)
         .replaceAll("&", "&amp;")
@@ -3892,7 +3906,7 @@ $faviconHref = 'data:image/svg+xml,' . rawurlencode($faviconSvg);
       return `
         <a
           class="calendar-premiere-chip ${typeClass}"
-          href="${escapeHtml(url)}"
+          href="${escapeHtml(safeExternalUrl(url))}"
           target="_blank"
           rel="noreferrer noopener"
           title="${escapeHtml(`${mediaLabel}: ${title}`)}"
@@ -4500,7 +4514,7 @@ $faviconHref = 'data:image/svg+xml,' . rawurlencode($faviconSvg);
             ? `
                 <a
                   class="mini-link filmweb-link mini-filmweb-logo"
-                  href="${escapeHtml(item.filmwebUrl)}"
+                  href="${escapeHtml(safeExternalUrl(item.filmwebUrl))}"
                   target="_blank"
                   rel="noreferrer noopener"
                   aria-label="Sprawdź na Filmweb.pl"
@@ -4854,7 +4868,7 @@ $faviconHref = 'data:image/svg+xml,' . rawurlencode($faviconSvg);
 
                       return `
                         ${provider.url
-                          ? `<a class="provider" href="${escapeHtml(provider.url)}" target="_blank" rel="noreferrer noopener">`
+                          ? `<a class="provider" href="${escapeHtml(safeExternalUrl(provider.url))}" target="_blank" rel="noreferrer noopener">`
                           : '<span class="provider">'
                         }
                           ${provider.logo ? `<img src="${escapeHtml(provider.logo)}" alt="">` : ""}
@@ -4873,7 +4887,7 @@ $faviconHref = 'data:image/svg+xml,' . rawurlencode($faviconSvg);
           ? `
             <a
               class="filmweb-link card-filmweb-button"
-              href="${escapeHtml(item.filmwebUrl)}"
+              href="${escapeHtml(safeExternalUrl(item.filmwebUrl))}"
               target="_blank"
               rel="noreferrer noopener"
               aria-label="Sprawdź na Filmweb.pl"
