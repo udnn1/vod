@@ -18,9 +18,10 @@ from dataclasses import dataclass
 from typing import Any
 
 try:
-    import httpcloak
+    import wreq
+    import wreq.blocking
 except Exception:
-    httpcloak = None
+    wreq = None
 
 try:
     from scrapling.parser import Selector
@@ -47,8 +48,7 @@ UPFLIX_SKIP_TITLE_FRAGMENTS = (
     "co wydarzy sie",
 )
 FILMWEB_BASE_URL = "https://www.filmweb.pl"
-HTTPCLOAK_PRESET = "chrome-146-windows"
-HTTPCLOAK_TIMEOUT = 20
+BROWSER_EMULATION_TIMEOUT = 20
 WARP_PROXY = "socks5://127.0.0.1:40000"
 
 HTTP_HEADERS = {
@@ -69,17 +69,26 @@ def json_error(message: str) -> None:
 
 
 @functools.lru_cache(maxsize=None)
-def cloak_session(proxy: str | None) -> Any:
-    return httpcloak.Session(preset=HTTPCLOAK_PRESET, proxy=proxy, timeout=HTTPCLOAK_TIMEOUT)
+def browser_client(proxy: str | None) -> Any:
+    options: dict[str, Any] = {
+        "emulation": wreq.Emulation.Chrome153,
+        "timeout": dt.timedelta(seconds=BROWSER_EMULATION_TIMEOUT),
+    }
+
+    if proxy:
+        options["proxies"] = [wreq.Proxy.all(proxy)]
+
+    return wreq.blocking.Client(**options)
 
 
-def fetch_text_cloak(url: str, proxy: str | None) -> str:
-    response = cloak_session(proxy).get(url, headers={"Accept-Language": HTTP_HEADERS["Accept-Language"]})
+def fetch_text_browser(url: str, proxy: str | None) -> str:
+    response = browser_client(proxy).get(url, headers={"Accept-Language": HTTP_HEADERS["Accept-Language"]})
+    status = response.status.as_int()
 
-    if response.status_code < 200 or response.status_code >= 300:
-        raise RuntimeError(f"HTTP {response.status_code} for {url}")
+    if status < 200 or status >= 300:
+        raise RuntimeError(f"HTTP {status} for {url}")
 
-    text = response.text
+    text = response.text()
 
     if not text.strip():
         raise RuntimeError(f"Empty response for {url}")
@@ -90,22 +99,22 @@ def fetch_text_cloak(url: str, proxy: str | None) -> str:
 def fetch_text(url: str, timeout: int = 25) -> str:
     errors = []
 
-    if httpcloak is not None:
+    if wreq is not None:
         try:
-            return fetch_text_cloak(url, None)
+            return fetch_text_browser(url, None)
         except Exception as exc:
-            errors.append(f"httpcloak: {exc}")
+            errors.append(f"wreq: {exc}")
 
     try:
         return fetch_text_urllib(url, timeout)
     except Exception as exc:
         errors.append(f"urllib: {exc}")
 
-    if httpcloak is not None:
+    if wreq is not None:
         try:
-            return fetch_text_cloak(url, WARP_PROXY)
+            return fetch_text_browser(url, WARP_PROXY)
         except Exception as exc:
-            errors.append(f"httpcloak+warp: {exc}")
+            errors.append(f"wreq+warp: {exc}")
 
     raise RuntimeError("; ".join(errors))
 

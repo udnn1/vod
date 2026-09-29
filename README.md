@@ -41,7 +41,7 @@ Lekka wyszukiwarka filmów i seriali pokazująca, gdzie dany tytuł jest dostęp
 - **TMDB API**
 - **Filmweb**
 - **Upflix**
-- **Python 3 + Scrapling + httpcloak** jako opcjonalna warstwa pomocnicza
+- **Python 3 + Scrapling + wreq** jako opcjonalna warstwa pomocnicza
 
 ## Wymagania
 
@@ -111,14 +111,14 @@ Most Scrapling uruchamia skrypt Python z poziomu PHP i pomaga pobierać dane z s
 Instalacja zależności:
 
 ```bash
-python -m pip install scrapling httpcloak
+python -m pip install scrapling wreq
 ```
 
 Strony pobierane są kolejno trzema drogami, aż któraś się uda:
 
-1. `httpcloak` z odciskiem przeglądarki Chrome, jednym połączeniem HTTP/2 dla wszystkich artykułów,
+1. `wreq` z odciskiem przeglądarki Chrome, jednym połączeniem HTTP/2 dla wszystkich artykułów,
 2. zwykły `urllib`,
-3. `httpcloak` przez WARP (`socks5://127.0.0.1:40000`), gdy blokada idzie po adresie IP.
+3. `wreq` przez WARP (`socks5://127.0.0.1:40000`), gdy blokada idzie po adresie IP.
 
 Opcjonalne zmienne:
 
